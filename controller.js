@@ -37,7 +37,7 @@ exports.createPeople = async (req, res) => {
 exports.insertData = async (req, res) => {
     try {
         console.log("==========================")
-        const query =`INSERT INTO nessie.peopleData (id, first_name, last_name, age) 
+        const query =`INSERT INTO nessie.people (id, first_name, last_name, age) 
         SELECT 
             ROW_NUMBER() OVER () AS id,
             CONCAT('firstName', ROW_NUMBER() OVER ()) AS first_name,
@@ -80,13 +80,13 @@ exports.updatePeople = async (req, res) => {
     console.log(req.body,"================");
     try {
 
-        const query = `UPDATE nessie.peopleData 
+        const query = `UPDATE nessie.people 
                SET first_name='${req.body.first_name}', 
                    last_name='${req.body.last_name}', 
                    age=${req.body.age} 
                WHERE id=${req.params['id']}`;
 
-        // const query = `update nessie.peopleData set first_name= + ${req.body.first_name} + ",last_name=" + req.body.last_name + ",age=" + req.body.age + " where id=" + req.params['id'];
+        // const query = `update nessie.people set first_name= + ${req.body.first_name} + ",last_name=" + req.body.last_name + ",age=" + req.body.age + " where id=" + req.params['id'];
         const token = await getLoginToken();
         const response = await axios.post(
             DREMIO_API,
@@ -110,7 +110,7 @@ exports.updatePeople = async (req, res) => {
 
 exports.getPeoples = async (req, res) => {
     try {
-        const query = "SELECT * FROM nessie.peopleData";
+        const query = "SELECT * FROM nessie.people";
         debugger
         const token = await getLoginToken();
 
@@ -135,7 +135,7 @@ exports.getPeoples = async (req, res) => {
 
 exports.deletePeople = async (req, res) => {
     try {
-        const query = "delete FROM nessie.peopleData where id=" + req.params['id'];
+        const query = "delete FROM nessie.people where id=" + req.params['id'];
         const token = await getLoginToken();
 
         console.log("query: " + query );
@@ -167,7 +167,7 @@ exports.bulkDelete = async (req, res) => {
             return res.status(400).json({ success: false, message: "No IDs provided" });
         }
 
-        const query = `DELETE FROM nessie.peopleData WHERE id IN (${ids.join(",")})`;
+        const query = `DELETE FROM nessie.people WHERE id IN (${ids.join(",")})`;
         const token = await getLoginToken();
 
         console.log("Executing query: ", query);
@@ -194,32 +194,80 @@ exports.bulkDelete = async (req, res) => {
 exports.bulkUpdate = async (req, res) => {
     try {
         const records = req.body.records;
-
+        
         if (!records || records.length === 0) {
             return res.status(400).json({ success: false, message: "No records provided" });
         }
 
-        let updateQueries = records.map(row => 
-            `UPDATE nessie.peopleData 
-             SET first_name='${row.first_name}', 
-                 last_name='${row.last_name}', 
-                 age=${row.age} 
-             WHERE id=${row.id}`
-        );
-
         const token = await getLoginToken();
+        const updateResults = [];
 
-        for (let query of updateQueries) {
-            console.log("Executing query:", query);
-            await axios.post(DREMIO_API, { sql: query }, { headers: { Authorization: `Bearer ${token}` } });
+        // Process updates sequentially to avoid overwhelming the server
+        for (const row of records) {
+            try {
+                const query = `UPDATE nessie.people
+                             SET first_name='${row.first_name}', 
+                                 last_name='${row.last_name}', 
+                                 age=${row.age} 
+                             WHERE id=${row.id}`;
+                
+                console.log("Executing query:", query);
+                
+                const response = await axios.post(
+                    DREMIO_API, 
+                    { sql: query }, 
+                    { headers: { Authorization: `Bearer ${token}` } }
+                );
+                
+                const jobStatus = await getJobStatus(response.data.id, token);
+                
+                updateResults.push({
+                    id: row.id,
+                    success: jobStatus === 'COMPLETED',
+                    status: jobStatus
+                });
+                
+                if (jobStatus !== 'COMPLETED') {
+                    console.error(`Update failed for id ${row.id}`);
+                }
+                
+            } catch (error) {
+                console.error(`Error updating record ${row.id}:`, error);
+                updateResults.push({
+                    id: row.id,
+                    success: false,
+                    error: error.message
+                });
+            }
         }
 
-        res.status(200).json({ success: true, message: "Records updated successfully" });
+        // Check if all updates succeeded
+        const allSuccess = updateResults.every(result => result.success);
+        
+        if (allSuccess) {
+            res.status(200).json({ 
+                success: true, 
+                message: "All records updated successfully",
+                details: updateResults
+            });
+        } else {
+            res.status(207).json({ // 207 Multi-Status
+                success: false,
+                message: "Some records failed to update",
+                details: updateResults
+            });
+        }
+        
     } catch (error) {
         console.error("Error during bulk update:", error);
-        res.status(500).json({ success: false, message: "Internal Server Error" });
+        res.status(500).json({ 
+            success: false, 
+            message: "Internal Server Error",
+            error: error.message 
+        });
     }
 };
+
 
 
 async function getLoginToken() {
